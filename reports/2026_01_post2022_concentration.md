@@ -82,3 +82,16 @@ The index was already highly correlated with its largest constituents prior to t
 ## Caveat
 
 RSP rebalances quarterly; part of the SPY–RSP divergence may reflect rebalancing drag rather than pure concentration effects.
+
+---
+
+## Reproducibility
+
+Analysis script:
+
+[View analysis script](../research/analysis/concentration_analysis.py)
+
+Run locally:
+
+```bash
+python research/analysis/concentration_analysis.py
