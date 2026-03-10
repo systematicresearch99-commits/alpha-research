@@ -1,0 +1,6 @@
+
+results/research.db       
+data/raw/*.csv            
+__pycache__/
+*.pyc
+.env                     
