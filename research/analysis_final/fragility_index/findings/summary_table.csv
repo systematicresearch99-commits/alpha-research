@@ -1,0 +1,9 @@
+Market,Test,Q1 (Safe) Mean,Q5 (Fragile) Mean,Stat,p-value,Significant
+US,Drawdown (1M),-2.61%,-5.21%,KW=26.30,0.0000,✓
+US,Drawdown (3M),-6.40%,-8.86%,KW=31.16,0.0000,✓
+US,Vol Expansion (OLS),—,—,"β=0.0074, R²=0.171",0.0000,✓
+US,Momentum Reversal,0.03%,0.10%,t=0.11,0.9127,✗
+IN,Drawdown (1M),-2.85%,-4.73%,KW=35.40,0.0000,✓
+IN,Drawdown (3M),-6.74%,-6.69%,KW=15.41,0.0039,✓
+IN,Vol Expansion (OLS),—,—,"β=0.0064, R²=0.141",0.0000,✓
+IN,Momentum Reversal,0.38%,0.47%,t=0.12,0.9016,✗
