@@ -11,6 +11,10 @@ Usage:
     # Run with custom params
     python run.py --strategy rsi --ticker BTC-USD --start 2020-01-01
 
+    # Run Kalman mispricing strategy
+    python run.py --strategy kalman --ticker SPY --start 2018-01-01
+    python run.py --strategy kalman --ticker SPY --entry-z 1.2 --exit-z 0.2 --obs-noise 2.0 --proc-noise 0.05
+
     # Run oil shock strategy (two-ticker pipeline)
     python run.py --strategy oil_shock --start 2000-01-01
 """
@@ -27,15 +31,16 @@ from utils.store        import save_run, compare_strategies
 from backtests.engine   import run_backtest
 
 # ── Strategy registry ──────────────────────────────────────────────────────────
-from strategies.sma_crossover      import generate_signals as sma_signals,      get_params as sma_params,      STRATEGY_NAME as SMA_NAME
-from strategies.rsi_mean_reversion import generate_signals as rsi_signals,      get_params as rsi_params,      STRATEGY_NAME as RSI_NAME
-from strategies.oil_shock_short    import generate_signals as oil_signals,      get_params as oil_params,      STRATEGY_NAME as OIL_NAME
+from strategies.sma_crossover      import generate_signals as sma_signals,     get_params as sma_params,     STRATEGY_NAME as SMA_NAME
+from strategies.rsi_mean_reversion import generate_signals as rsi_signals,     get_params as rsi_params,     STRATEGY_NAME as RSI_NAME
+from strategies.kalman_mispricing  import generate_signals as kalman_signals,  get_params as kalman_params,  STRATEGY_NAME as KALMAN_NAME
+from strategies.oil_shock_short    import generate_signals as oil_signals,     get_params as oil_params,     STRATEGY_NAME as OIL_NAME
 
 STRATEGIES = {
-    "sma":       (sma_signals, sma_params, SMA_NAME),
-    "rsi":       (rsi_signals, rsi_params, RSI_NAME),
-    # oil_shock intentionally excluded from standard registry —
-    # requires two-ticker pipeline, handled by run_oil_shock() below.
+    "sma":    (sma_signals,    sma_params,    SMA_NAME),
+    "rsi":    (rsi_signals,    rsi_params,    RSI_NAME),
+    "kalman": (kalman_signals, kalman_params, KALMAN_NAME),
+    # oil_shock handled separately — two-ticker pipeline
 }
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -86,22 +91,7 @@ def run_oil_shock(start="2000-01-01", end=None, shock_col="daily_shock",
                   hold_days=3, notes=None):
     """
     Two-ticker pipeline for Oil Shock Short strategy.
-
-    Loads WTI (CL=F) and S&P 500 (^GSPC) separately, computes shock
-    flags from WTI, merges onto S&P 500 dataframe, then follows the
-    standard signal → backtest → metrics flow.
-
-    NOTE: Results are NOT saved to SQLite — experimental research run.
-
-    Args:
-        start     : start date string (default "2000-01-01")
-        end       : end date string (optional)
-        shock_col : "daily_shock" | "weekly_shock"
-        hold_days : days to hold short after shock (default 3)
-        notes     : optional note string (printed only, not saved)
-
-    Returns:
-        (df_result, metrics_dict)
+    Results are NOT saved to SQLite — experimental research run.
     """
     import numpy as np
     from strategies.oil_shock_short import generate_signals as oil_signals, STRATEGY_NAME as OIL_NAME
@@ -117,14 +107,12 @@ def run_oil_shock(start="2000-01-01", end=None, shock_col="daily_shock",
     print(f"[run] Loading S&P 500 (^GSPC)...")
     sp500 = load_data("^GSPC", start=start, end=end, source="yfinance", ohlcv=False)
 
-    # Merge on inner join — only dates both traded
     df = sp500.join(wti, how="inner")
     df["wti_ret"] = df["WTI"].pct_change()
     df.dropna(inplace=True)
 
     print(f"[run] {len(df)} rows loaded  ({df.index[0].date()} → {df.index[-1].date()})")
 
-    # Compute shock flags
     df["daily_shock_raw"]  = (df["wti_ret"] > DAILY_THRESH).astype(int)
     df["weekly_ret_wti"]   = df["wti_ret"].rolling(5).sum()
     df["weekly_shock_raw"] = (df["weekly_ret_wti"] > WEEKLY_THRESH).astype(int)
@@ -143,7 +131,6 @@ def run_oil_shock(start="2000-01-01", end=None, shock_col="daily_shock",
     n_shocks = df[shock_col].sum()
     print(f"[run] {shock_col}: {n_shocks} events identified")
 
-    # Standard signal → backtest → metrics
     print(f"[run] Generating signals: {OIL_NAME}")
     df = oil_signals(df, shock_col=shock_col, hold_days=hold_days)
 
@@ -155,7 +142,6 @@ def run_oil_shock(start="2000-01-01", end=None, shock_col="daily_shock",
 
     print_summary(metrics, strategy_name=f"{OIL_NAME}  [^GSPC | {shock_col} | hold={hold_days}d]")
 
-    # NOT saved to SQLite — experimental only
     if notes:
         print(f"[run] Notes: {notes}")
     print(f"[run] Oil shock run complete (not saved to research log — experimental)")
@@ -165,17 +151,26 @@ def run_oil_shock(start="2000-01-01", end=None, shock_col="daily_shock",
 
 def main():
     parser = argparse.ArgumentParser(description="AlphaByProcess — Backtest Runner")
-    parser.add_argument("--strategy",  default="sma",        help="Strategy key: sma | rsi | oil_shock")
-    parser.add_argument("--ticker",    default="BTC-USD",    help="Ticker symbol (not used for oil_shock)")
-    parser.add_argument("--start",     default="2020-01-01", help="Start date")
-    parser.add_argument("--end",       default=None,         help="End date (optional)")
-    parser.add_argument("--source",    default="yfinance",   help="Data source: yfinance | binance | csv")
-    parser.add_argument("--compare",   action="store_true",  help="Print comparison of all saved runs")
-    parser.add_argument("--no-save",   action="store_true",  help="Don't save results to DB")
-    parser.add_argument("--notes",     default=None,         help="Research note to attach")
+    parser.add_argument("--strategy",   default="sma",         help="Strategy key: sma | rsi | kalman | oil_shock")
+    parser.add_argument("--ticker",     default="BTC-USD",     help="Ticker symbol (not used for oil_shock)")
+    parser.add_argument("--start",      default="2020-01-01",  help="Start date")
+    parser.add_argument("--end",        default=None,          help="End date (optional)")
+    parser.add_argument("--source",     default="yfinance",    help="Data source: yfinance | binance | csv")
+    parser.add_argument("--compare",    action="store_true",   help="Print comparison of all saved runs")
+    parser.add_argument("--no-save",    action="store_true",   help="Don't save results to DB")
+    parser.add_argument("--notes",      default=None,          help="Research note to attach")
+
     # Oil shock specific
-    parser.add_argument("--shock-col", default="daily_shock", help="daily_shock | weekly_shock")
-    parser.add_argument("--hold-days", default=3, type=int,   help="Days to hold short (oil_shock only)")
+    parser.add_argument("--shock-col",  default="daily_shock", help="daily_shock | weekly_shock")
+    parser.add_argument("--hold-days",  default=3, type=int,   help="Days to hold short (oil_shock only)")
+
+    # Kalman specific
+    parser.add_argument("--obs-noise",  default=1.0,  type=float, help="Kalman observation noise R (default 1.0)")
+    parser.add_argument("--proc-noise", default=0.01, type=float, help="Kalman process noise Q (default 0.01)")
+    parser.add_argument("--entry-z",    default=1.5,  type=float, help="Kalman entry z-score threshold (default 1.5)")
+    parser.add_argument("--exit-z",     default=0.3,  type=float, help="Kalman exit z-score threshold (default 0.3)")
+    parser.add_argument("--stop-z",     default=3.5,  type=float, help="Kalman stop-loss z-score (default 3.5)")
+
     args = parser.parse_args()
 
     if args.compare:
@@ -189,6 +184,21 @@ def main():
             shock_col = args.shock_col,
             hold_days = args.hold_days,
             notes     = args.notes,
+        )
+    elif args.strategy == "kalman":
+        run_strategy(
+            strategy_key  = "kalman",
+            ticker        = args.ticker,
+            start         = args.start,
+            end           = args.end,
+            source        = args.source,
+            save          = not args.no_save,
+            notes         = args.notes,
+            obs_noise_var = args.obs_noise,
+            proc_noise_var= args.proc_noise,
+            entry_z       = args.entry_z,
+            exit_z        = args.exit_z,
+            stop_loss_z   = args.stop_z,
         )
     else:
         run_strategy(
@@ -213,6 +223,9 @@ if __name__ == "__main__":
 
         run_strategy("rsi", "BTC-USD", start="2020-01-01",
                      notes="Baseline RSI mean reversion run")
+
+        run_strategy("kalman", "BTC-USD", start="2020-01-01",
+                     notes="Kalman mispricing baseline run")
 
         print("\n── Comparison of all saved runs ──")
         compare_strategies()
