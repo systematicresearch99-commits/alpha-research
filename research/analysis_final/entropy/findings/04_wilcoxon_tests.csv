@@ -1,0 +1,13 @@
+series,measure,regime_a,regime_b,statistic,pval,significant
+Nifty50,shannon,pre_covid,covid_recovery,10.0296,0.0,True
+Nifty50,shannon,covid_recovery,rate_hike,-8.4508,0.0,True
+Nifty50,apen,pre_covid,covid_recovery,-7.3277,0.0,True
+Nifty50,apen,covid_recovery,rate_hike,7.4537,0.0,True
+Nifty50,sampen,pre_covid,covid_recovery,5.4476,0.0,True
+Nifty50,sampen,covid_recovery,rate_hike,-1.0148,0.3102,False
+SP500,shannon,pre_covid,covid_recovery,-4.8186,0.0,True
+SP500,shannon,covid_recovery,rate_hike,-4.1073,0.0,True
+SP500,apen,pre_covid,covid_recovery,11.5009,0.0,True
+SP500,apen,covid_recovery,rate_hike,-6.1157,0.0,True
+SP500,sampen,pre_covid,covid_recovery,9.5885,0.0,True
+SP500,sampen,covid_recovery,rate_hike,-15.6271,0.0,True

@@ -1,0 +1,4 @@
+measure,india_mean,us_mean,diff,bootstrap_pval,ci_lo_95,ci_hi_95,significant
+shannon,3.60026,3.66609,-0.06583,0.0,-0.00407,0.00422,True
+apen,0.40482,0.38965,0.01517,0.0,-0.00118,0.0013,True
+sampen,inf,inf,,0.0,,,True
