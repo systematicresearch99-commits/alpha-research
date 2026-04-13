@@ -50,7 +50,6 @@ Volatility: atr, keltner
 Volume:     obv, vwap
 Statistical:kalman
 """
-
 import sys
 import os
 import argparse
@@ -60,10 +59,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from utils.data_loader  import load_data
 from utils.performance  import calculate_metrics, print_summary, _extract_trades
 from utils.store        import save_run, compare_strategies
+from utils.plotting     import plot_run, plot_compare, plot_overlay, block
 from backtests.engine   import run_backtest
 from risk.risk_manager  import apply_stack, apply_compare, list_modules, REGISTRY
 
-# ── Strategy imports ───────────────────────────────────────────────────────────
 from strategies.sma_crossover       import generate_signals as sma_signals,      get_params as sma_params,      STRATEGY_NAME as SMA_NAME
 from strategies.ema_crossover       import generate_signals as ema_signals,      get_params as ema_params,      STRATEGY_NAME as EMA_NAME
 from strategies.macd                import generate_signals as macd_signals,     get_params as macd_params,     STRATEGY_NAME as MACD_NAME
@@ -99,162 +98,105 @@ STRATEGIES = {
 }
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
-
 def _attach_regime(df, data, index_ticker, start, end, feature_window=20):
-    """Train HMM and attach regime labels to df."""
     from research.regime_detection.hmm_model       import RegimeDetector
     from research.regime_detection.regime_analyzer import RegimeAnalyzer
-
-    print(f"  [risk] Loading benchmark index: {index_ticker}")
+    print(f"  [risk] Loading benchmark: {index_ticker}")
     index_data = load_data(index_ticker, start=start, end=end, source="yfinance", ohlcv=True)
-
-    print(f"  [risk] Training HMM regime detector...")
+    print(f"  [risk] Training HMM...")
     detector = RegimeDetector(n_regimes=4, n_iter=1000, window=feature_window)
     detector.fit(data["Close"], index_data["Close"])
-
     analyzer = RegimeAnalyzer(detector, index_data["Close"])
-    df       = analyzer.attach_regimes(df, data["Close"])
-    print(f"  [risk] Regime labels attached.")
+    if hasattr(analyzer, "attach_regimes"):
+        df = analyzer.attach_regimes(df, data["Close"])
     return df
 
 
 def _print_risk_summary(metrics, label):
-    """Print a compact one-line risk result."""
-    sr   = metrics.get("Sharpe Ratio", float("nan"))
-    tr   = metrics.get("Total Return", float("nan"))
-    mdd  = metrics.get("Max Drawdown", float("nan"))
-    wr   = metrics.get("Win Rate", float("nan"))
+    sr  = metrics.get("Sharpe Ratio", float("nan"))
+    tr  = metrics.get("Total Return", float("nan"))
+    mdd = metrics.get("Max Drawdown", float("nan"))
+    wr  = metrics.get("Win Rate",     float("nan"))
     print(f"  {label:<30}  Sharpe={sr:>6.3f}  Return={tr*100:>7.2f}%  "
           f"MaxDD={mdd*100:>7.2f}%  WinRate={wr*100:>5.1f}%")
 
 
-def _save_risk_run(strategy_name, ticker, metrics, params, risk_keys,
-                   start_date, end_date, df, notes, db_path=None):
-    trades_df = _extract_trades(df)
-    run_id = save_run(
-        strategy   = f"{strategy_name}+{'|'.join(risk_keys)}",
-        ticker     = ticker,
-        metrics    = metrics,
-        params     = params,
-        start_date = start_date,
-        end_date   = end_date,
-        trades_df  = trades_df,
-        notes      = notes,
-        db_path    = db_path,
-    )
-    return run_id
-
-
-# ── Core pipeline ──────────────────────────────────────────────────────────────
+# ── Core single-run pipeline ──────────────────────────────────────────────────
 
 def run_risk(
-    strategy_key,
-    ticker,
-    start,
-    risk_modules,
-    end             = None,
-    source          = "yfinance",
-    compare         = False,
-    use_regime      = False,
-    index_ticker    = "SPY",
-    feature_window  = 20,
-    save            = True,
-    notes           = None,
-    strategy_kwargs = None,
-    module_kwargs   = None,
+    strategy_key, ticker, start, risk_modules,
+    end=None, source="yfinance", compare=False,
+    use_regime=False, index_ticker="SPY", feature_window=20,
+    save=True, notes=None, strategy_kwargs=None, module_kwargs=None,
+    show_chart=True,
 ):
     """
-    Full pipeline:
-      load → signal → base backtest → risk modules → metrics → store → print
-
-    Args:
-        strategy_key    : strategy key from STRATEGIES dict
-        ticker          : ticker symbol e.g. "SPY", "BTC-USD"
-        start           : start date string
-        risk_modules    : list of risk module keys to apply
-        end             : end date string (optional)
-        source          : "yfinance" | "binance" | "csv"
-        compare         : if True, run modules side by side instead of stacking
-        use_regime      : if True, train HMM and attach regime labels
-        index_ticker    : benchmark for HMM (default "SPY")
-        feature_window  : HMM feature window (default 20)
-        save            : persist to SQLite (default True)
-        notes           : research note string
-        strategy_kwargs : dict of strategy params e.g. {"short_window": 10}
-        module_kwargs   : dict of {module_key: {param: value}}
-
-    Returns:
-        (base_df, risk_result)
-        risk_result is a dict {module_key: df} if compare=True,
-        or a single df if stacking.
+    Single strategy × single ticker risk pipeline.
+    Returns (base_df, risk_result).
     """
     if strategy_key not in STRATEGIES:
         raise ValueError(f"Unknown strategy '{strategy_key}'. Choose from: {list(STRATEGIES)}")
-
     invalid = [k for k in risk_modules if k not in REGISTRY]
     if invalid:
-        raise ValueError(f"Unknown risk module(s): {invalid}. Choose from: {list(REGISTRY)}")
+        raise ValueError(f"Unknown risk module(s): {invalid}")
 
     strategy_kwargs = strategy_kwargs or {}
     module_kwargs   = module_kwargs   or {}
-
     gen_signals, get_p, strat_name = STRATEGIES[strategy_key]
 
-    # ── 1. Load ───────────────────────────────────────────────────────────────
     print(f"\n[risk] Loading {ticker} from {source} (start={start})")
     data = load_data(ticker, start=start, end=end, source=source, ohlcv=True)
     print(f"[risk] {len(data)} rows loaded  ({data.index[0].date()} → {data.index[-1].date()})")
 
-    # ── 2. Signal ─────────────────────────────────────────────────────────────
     print(f"[risk] Generating signals: {strat_name}")
     df = gen_signals(data, **strategy_kwargs)
 
-    # ── 3. Base backtest (needed for drawdown_adaptive and baseline comparison)
     print(f"[risk] Running base backtest...")
     df = run_backtest(df)
 
     base_metrics = calculate_metrics(df)
     print_summary(base_metrics, strategy_name=f"{strat_name}  [{ticker}]  (no risk)")
 
-    # ── 4. Attach regime labels if needed ─────────────────────────────────────
     if use_regime or "regime_sizer" in risk_modules:
         df = _attach_regime(df, data, index_ticker, start, end, feature_window)
 
-    # ── 5. Apply risk modules ─────────────────────────────────────────────────
     risk_label = " + ".join(risk_modules)
 
+    # ── Compare mode ──────────────────────────────────────────────────────────
     if compare:
         print(f"\n[risk] Comparing {len(risk_modules)} modules side by side...")
         results = apply_compare(df, risk_modules, module_kwargs)
 
         print(f"\n{'═'*75}")
-        print(f"  Risk Module Comparison  —  {strat_name} [{ticker}]")
+        print(f"  Risk Comparison  —  {strat_name} [{ticker}]")
         print(f"{'═'*75}")
-
-        # Print baseline first
         print(f"\n  {'Module':<30}  {'Sharpe':>6}  {'Return':>8}  {'MaxDD':>8}  {'WinRate':>8}")
         print(f"  {'─'*70}")
         _print_risk_summary(base_metrics, "Baseline (no risk)")
 
-        all_metrics = {"baseline": (base_metrics, df)}
-
         for key, risk_df in results.items():
             risk_metrics = calculate_metrics(risk_df)
-            all_metrics[key] = (risk_metrics, risk_df)
             _print_risk_summary(risk_metrics, REGISTRY[key][2])
-
             if save:
-                params = {**get_p(**strategy_kwargs), **module_kwargs.get(key, {})}
-                _save_risk_run(
-                    strat_name, ticker, risk_metrics, params,
-                    [key], str(data.index[0].date()), str(data.index[-1].date()),
-                    risk_df, notes,
+                params    = {**get_p(**strategy_kwargs), **module_kwargs.get(key, {})}
+                trades_df = _extract_trades(risk_df)
+                save_run(
+                    strategy=f"{strat_name}+{key}", ticker=ticker,
+                    metrics=risk_metrics, params=params,
+                    start_date=str(data.index[0].date()),
+                    end_date=str(data.index[-1].date()),
+                    trades_df=trades_df, notes=notes,
                 )
 
         print(f"{'═'*75}\n")
+
+        if show_chart:
+            chart_title = f"{strat_name}  |  {ticker}  |  Risk Comparison: {', '.join(risk_modules)}"
+            plot_compare(results, df, title=chart_title)
+
         return df, results
 
+    # ── Stack mode ────────────────────────────────────────────────────────────
     else:
         print(f"\n[risk] Stacking: {risk_label}")
         risk_df      = apply_stack(df, risk_modules, module_kwargs)
@@ -262,8 +204,7 @@ def run_risk(
 
         print_summary(risk_metrics, strategy_name=f"{strat_name}  [{ticker}]  ({risk_label})")
 
-        # Side-by-side delta vs baseline
-        print(f"\n  Delta vs baseline (no risk):")
+        print(f"\n  Delta vs baseline:")
         for metric in ["Sharpe Ratio", "Total Return", "Max Drawdown", "Win Rate"]:
             base_val = base_metrics.get(metric, 0) or 0
             risk_val = risk_metrics.get(metric, 0) or 0
@@ -273,16 +214,113 @@ def run_risk(
             val_str  = f"{sign}{delta*100:.2f}%" if is_pct else f"{sign}{delta:.4f}"
             print(f"    {metric:<22} {val_str}")
 
+        if show_chart:
+            plot_run(risk_df, title=f"{strat_name}  |  {ticker}  |  {risk_label}")
+
         if save:
-            params = {**get_p(**strategy_kwargs), **{k: v for d in module_kwargs.values() for k, v in d.items()}}
-            run_id = _save_risk_run(
-                strat_name, ticker, risk_metrics, params,
-                risk_modules, str(data.index[0].date()), str(data.index[-1].date()),
-                risk_df, notes,
+            params    = {**get_p(**strategy_kwargs), **{k: v for d in module_kwargs.values() for k, v in d.items()}}
+            trades_df = _extract_trades(risk_df)
+            run_id    = save_run(
+                strategy=f"{strat_name}+{'|'.join(risk_modules)}", ticker=ticker,
+                metrics=risk_metrics, params=params,
+                start_date=str(data.index[0].date()),
+                end_date=str(data.index[-1].date()),
+                trades_df=trades_df, notes=notes,
             )
             print(f"\n[risk] Run saved → ID {run_id}")
 
         return df, risk_df
+
+
+# ── Multi-run pipelines ───────────────────────────────────────────────────────
+
+def run_multi_strategy_risk(
+    strategy_keys, ticker, start, risk_modules,
+    end=None, source="yfinance", compare_risk=False,
+    use_regime=False, index_ticker="SPY", feature_window=20,
+    save=True, notes=None, overlay=False, module_kwargs=None,
+):
+    """Multiple strategies × one ticker — same risk module(s) applied to each."""
+    print(f"\n[risk] Multi-strategy risk — {len(strategy_keys)} strategies on {ticker}")
+    results_map = {}
+
+    for key in strategy_keys:
+        base_df, risk_result = run_risk(
+            key, ticker, start, risk_modules,
+            end=end, source=source, compare=compare_risk,
+            use_regime=use_regime, index_ticker=index_ticker,
+            feature_window=feature_window, save=save, notes=notes,
+            module_kwargs=module_kwargs, show_chart=not overlay,
+        )
+        label = STRATEGIES[key][2]
+        # If compare mode, use first module result for overlay; else use risk_result directly
+        results_map[label] = risk_result if not compare_risk else list(risk_result.values())[0]
+
+    if overlay and results_map:
+        risk_label = " + ".join(risk_modules)
+        plot_overlay(results_map,
+                     title=f"Strategy Comparison  |  {ticker}  |  {risk_label}")
+
+    return results_map
+
+
+def run_multi_ticker_risk(
+    strategy_key, tickers, start, risk_modules,
+    end=None, source="yfinance", compare_risk=False,
+    use_regime=False, index_ticker="SPY", feature_window=20,
+    save=True, notes=None, overlay=False, module_kwargs=None,
+):
+    """One strategy × multiple tickers — same risk module(s) applied to each."""
+    strat_name = STRATEGIES[strategy_key][2]
+    print(f"\n[risk] Multi-ticker risk — {strat_name} on {len(tickers)} tickers")
+    results_map = {}
+
+    for ticker in tickers:
+        base_df, risk_result = run_risk(
+            strategy_key, ticker, start, risk_modules,
+            end=end, source=source, compare=compare_risk,
+            use_regime=use_regime, index_ticker=index_ticker,
+            feature_window=feature_window, save=save, notes=notes,
+            module_kwargs=module_kwargs, show_chart=not overlay,
+        )
+        results_map[ticker] = risk_result if not compare_risk else list(risk_result.values())[0]
+
+    if overlay and results_map:
+        risk_label = " + ".join(risk_modules)
+        plot_overlay(results_map,
+                     title=f"{strat_name}  |  Ticker Comparison  |  {risk_label}")
+
+    return results_map
+
+
+def run_matrix_risk(
+    strategy_keys, tickers, start, risk_modules,
+    end=None, source="yfinance", save=True, notes=None,
+    overlay=False, module_kwargs=None,
+):
+    """Multiple strategies × multiple tickers — overlay per ticker if enabled."""
+    print(f"\n[risk] Matrix risk — {len(strategy_keys)} strategies × {len(tickers)} tickers")
+    all_results = {}
+
+    for ticker in tickers:
+        ticker_map = {}
+        for key in strategy_keys:
+            base_df, risk_result = run_risk(
+                key, ticker, start, risk_modules,
+                end=end, source=source, save=save, notes=notes,
+                module_kwargs=module_kwargs, show_chart=not overlay,
+            )
+            label = STRATEGIES[key][2]
+            result_df = risk_result if not isinstance(risk_result, dict) else list(risk_result.values())[0]
+            ticker_map[label] = result_df
+            all_results[f"{label} | {ticker}"] = result_df
+
+        if overlay and ticker_map:
+            risk_label = " + ".join(risk_modules)
+            plot_overlay(ticker_map,
+                         title=f"Strategy Comparison  |  {ticker}  |  {risk_label}")
+
+    return all_results
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
@@ -293,43 +331,40 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Single module
-  python run_risk.py --strategy macd --ticker SPY --start 2015-01-01 --risk atr_sizing
-
-  # Stack (combined backtest)
+  python run_risk.py --strategy macd --ticker SPY --risk atr_sizing
   python run_risk.py --strategy rsi --ticker BTC-USD --risk atr_sizing atr_trailing_stop
-
-  # Compare side by side
-  python run_risk.py --strategy sma --ticker SPY --risk fixed_fractional kelly vol_target --compare
-
-  # With regime labels
-  python run_risk.py --strategy macd --ticker SPY --risk regime_sizer --regime
+  python run_risk.py --strategy sma --ticker SPY --risk fixed_fractional kelly --compare
+  python run_risk.py --strategies sma ema macd --ticker HDFCBANK.NS --risk atr_sizing --overlay
+  python run_risk.py --strategy macd --tickers HDFCBANK.NS RELIANCE.NS --risk vol_target --overlay
         """
     )
 
-    parser.add_argument("--strategy",   default="sma",        help="Strategy key")
-    parser.add_argument("--ticker",     default="SPY",        help="Ticker symbol")
-    parser.add_argument("--start",      default="2015-01-01", help="Start date")
-    parser.add_argument("--end",        default=None,         help="End date (optional)")
-    parser.add_argument("--source",     default="yfinance",   help="Data source")
+    strat_group = parser.add_mutually_exclusive_group()
+    strat_group.add_argument("--strategy",   default=None,        help="Single strategy key")
+    strat_group.add_argument("--strategies", nargs="+",           help="Multiple strategy keys")
 
-    parser.add_argument("--risk",       nargs="+",            help="Risk module key(s)", required=False)
-    parser.add_argument("--compare",    action="store_true",  help="Compare modules side by side")
-    parser.add_argument("--regime",     action="store_true",  help="Attach HMM regime labels")
-    parser.add_argument("--index",      default="SPY",        help="Benchmark index for HMM")
-    parser.add_argument("--window",     default=20, type=int, help="HMM feature window")
+    ticker_group = parser.add_mutually_exclusive_group()
+    ticker_group.add_argument("--ticker",    default=None,        help="Single ticker")
+    ticker_group.add_argument("--tickers",   nargs="+",           help="Multiple tickers")
 
-    parser.add_argument("--no-save",    action="store_true",  help="Don't save to DB")
-    parser.add_argument("--compare-all",action="store_true",  help="Compare all saved runs in DB")
-    parser.add_argument("--list-modules",action="store_true", help="List all available risk modules")
-    parser.add_argument("--notes",      default=None,         help="Research note")
-
-    # Kalman-specific
-    parser.add_argument("--obs-noise",  default=1.0,  type=float)
-    parser.add_argument("--proc-noise", default=0.01, type=float)
-    parser.add_argument("--entry-z",    default=1.5,  type=float)
-    parser.add_argument("--exit-z",     default=0.3,  type=float)
-    parser.add_argument("--stop-z",     default=3.5,  type=float)
+    parser.add_argument("--risk",        nargs="+",               help="Risk module key(s)", required=False)
+    parser.add_argument("--compare",     action="store_true",     help="Compare risk modules side by side")
+    parser.add_argument("--overlay",     action="store_true",     help="Overlay equity curves on one chart")
+    parser.add_argument("--regime",      action="store_true",     help="Attach HMM regime labels")
+    parser.add_argument("--index",       default="SPY",           help="Benchmark index for HMM")
+    parser.add_argument("--window",      default=20,  type=int)
+    parser.add_argument("--start",       default="2015-01-01")
+    parser.add_argument("--end",         default=None)
+    parser.add_argument("--source",      default="yfinance")
+    parser.add_argument("--no-save",     action="store_true")
+    parser.add_argument("--compare-all", action="store_true",     help="Compare all saved runs in DB")
+    parser.add_argument("--list-modules",action="store_true",     help="List all available risk modules")
+    parser.add_argument("--notes",       default=None)
+    parser.add_argument("--obs-noise",   default=1.0,  type=float)
+    parser.add_argument("--proc-noise",  default=0.01, type=float)
+    parser.add_argument("--entry-z",     default=1.5,  type=float)
+    parser.add_argument("--exit-z",      default=0.3,  type=float)
+    parser.add_argument("--stop-z",      default=3.5,  type=float)
 
     args = parser.parse_args()
 
@@ -344,61 +379,70 @@ Examples:
     if not args.risk:
         parser.error("--risk is required. Use --list-modules to see options.")
 
+    strategies = args.strategies or ([args.strategy] if args.strategy else ["sma"])
+    tickers    = args.tickers    or ([args.ticker]    if args.ticker    else ["SPY"])
+    save       = not args.no_save
+
     strategy_kwargs = {}
-    if args.strategy == "kalman":
+    if "kalman" in strategies:
         strategy_kwargs = dict(
-            obs_noise_var  = args.obs_noise,
-            proc_noise_var = args.proc_noise,
-            entry_z        = args.entry_z,
-            exit_z         = args.exit_z,
-            stop_loss_z    = args.stop_z,
+            obs_noise_var=args.obs_noise, proc_noise_var=args.proc_noise,
+            entry_z=args.entry_z, exit_z=args.exit_z, stop_loss_z=args.stop_z,
         )
 
-    run_risk(
-        strategy_key   = args.strategy,
-        ticker         = args.ticker,
-        start          = args.start,
-        end            = args.end,
-        source         = args.source,
-        risk_modules   = args.risk,
-        compare        = args.compare,
-        use_regime     = args.regime,
-        index_ticker   = args.index,
-        feature_window = args.window,
-        save           = not args.no_save,
-        notes          = args.notes,
-        strategy_kwargs= strategy_kwargs,
-    )
+    # Dispatch
+    if len(strategies) == 1 and len(tickers) == 1:
+        run_risk(
+            strategies[0], tickers[0], args.start, args.risk,
+            end=args.end, source=args.source, compare=args.compare,
+            use_regime=args.regime, index_ticker=args.index,
+            feature_window=args.window, save=save, notes=args.notes,
+            strategy_kwargs=strategy_kwargs,
+        )
+
+    elif len(strategies) > 1 and len(tickers) == 1:
+        run_multi_strategy_risk(
+            strategies, tickers[0], args.start, args.risk,
+            end=args.end, source=args.source, compare_risk=args.compare,
+            use_regime=args.regime, index_ticker=args.index,
+            feature_window=args.window, save=save, notes=args.notes,
+            overlay=args.overlay,
+        )
+
+    elif len(strategies) == 1 and len(tickers) > 1:
+        run_multi_ticker_risk(
+            strategies[0], tickers, args.start, args.risk,
+            end=args.end, source=args.source, compare_risk=args.compare,
+            use_regime=args.regime, index_ticker=args.index,
+            feature_window=args.window, save=save, notes=args.notes,
+            overlay=args.overlay,
+        )
+
+    else:
+        run_matrix_risk(
+            strategies, tickers, args.start, args.risk,
+            end=args.end, source=args.source, save=save,
+            notes=args.notes, overlay=args.overlay,
+        )
+
+    block()
 
 
 if __name__ == "__main__":
     if len(sys.argv) == 1:
         print("=" * 65)
-        print("  AlphaByProcess — Risk Module Demo")
-        print("  MACD on SPY 2015→2024")
+        print("  AlphaByProcess — Risk Demo: MACD on SPY 2015→2024")
         print("=" * 65)
 
-        # Demo 1: Compare all sizing modules
-        run_risk(
-            strategy_key = "macd",
-            ticker       = "SPY",
-            start        = "2015-01-01",
-            risk_modules = ["fixed_fractional", "atr_sizing", "kelly", "vol_target"],
-            compare      = True,
-            notes        = "Sizing module comparison — MACD SPY",
-        )
+        run_risk("macd", "SPY", "2015-01-01",
+                 ["fixed_fractional", "atr_sizing", "kelly", "vol_target"],
+                 compare=True, notes="Sizing comparison — MACD SPY")
 
-        # Demo 2: Stack sizing + stop
-        run_risk(
-            strategy_key = "macd",
-            ticker       = "SPY",
-            start        = "2015-01-01",
-            risk_modules = ["atr_sizing", "atr_trailing_stop"],
-            compare      = False,
-            notes        = "ATR sizing + ATR trailing stop stacked — MACD SPY",
-        )
+        run_risk("macd", "SPY", "2015-01-01",
+                 ["atr_sizing", "atr_trailing_stop"],
+                 notes="ATR sizing + trailing stop stacked — MACD SPY")
 
-        print("\n── All saved runs ──")
         compare_strategies()
+        block()
     else:
         main()
