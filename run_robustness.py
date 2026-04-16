@@ -219,22 +219,24 @@ def _plot_walk_forward(wf_results, base_df, title):
 
 
 def _plot_param_sensitivity(ps_results, title):
-    df         = ps_results["results_df"]
+    df          = ps_results["results_df"]
     param_names = ps_results["param_names"]
     metric      = ps_results["metric"]
+    n_params    = len(param_names)
 
     fig = plt.figure(figsize=(14, 9), num=title)
     fig.suptitle(title, color=STYLE["text"], fontsize=11, y=0.98)
-
-    n_params = len(param_names)
-    gs = gridspec.GridSpec(2, max(n_params, 2), figure=fig,
-                           hspace=0.5, wspace=0.35)
-    _style_ax(fig, [])
     fig.patch.set_facecolor(STYLE["bg"])
 
-    # Per-parameter marginal distributions (box per param value)
+    # Top row: one subplot per parameter
+    n_top_cols = max(n_params, 2)
+    gs_top = gridspec.GridSpec(1, n_top_cols, figure=fig,
+                               top=0.88, bottom=0.52, hspace=0.5, wspace=0.35)
+    gs_bot = gridspec.GridSpec(1, 2, figure=fig,
+                               top=0.44, bottom=0.08, hspace=0.5, wspace=0.35)
+
     for i, param in enumerate(param_names):
-        ax = fig.add_subplot(gs[0, i % gs.ncols])
+        ax = fig.add_subplot(gs_top[0, i % n_top_cols])
         _style_ax(fig, [ax])
         grouped = df.groupby(param)[metric].mean().reset_index()
         ax.bar(grouped[param].astype(str), grouped[metric],
@@ -246,42 +248,37 @@ def _plot_param_sensitivity(ps_results, title):
         ax.set_title(f"{param} sensitivity", fontsize=9)
         plt.setp(ax.xaxis.get_majorticklabels(), rotation=30, ha="right")
 
-    # Distribution of metric across all combinations
-    ax_dist = fig.add_subplot(gs[1, :max(2, n_params//2)])
+    ax_dist = fig.add_subplot(gs_bot[0, 0])
     _style_ax(fig, [ax_dist])
     metric_vals = df[metric].dropna()
-    ax_dist.hist(metric_vals, bins=min(30, len(metric_vals)//2 + 1),
+    n_bins = max(5, min(30, len(metric_vals) // 2 + 1))
+    ax_dist.hist(metric_vals, bins=n_bins,
                  color=STYLE["blue"], alpha=0.7, edgecolor=STYLE["grid"])
-    ax_dist.axvline(ps_results["actual_sharpe"] if "actual_sharpe" in ps_results
-                    else ps_results["metric_max"],
-                    color=STYLE["green"], linewidth=1.5,
-                    linestyle="--", label="Best params")
+    ax_dist.axvline(ps_results.get("actual_sharpe", ps_results["metric_max"]),
+                    color=STYLE["green"], linewidth=1.5, linestyle="--", label="Best params")
     ax_dist.axvline(ps_results["metric_mean"], color=STYLE["orange"],
                     linewidth=1.5, linestyle="--", label="Mean")
     ax_dist.axvline(0, color=STYLE["red"], linewidth=1, linestyle="-", alpha=0.5)
     ax_dist.set_xlabel(metric, fontsize=8)
     ax_dist.set_ylabel("Count", fontsize=8)
-    ax_dist.set_title(f"Distribution of {metric} across {ps_results['n_combinations']} param combos", fontsize=9)
+    ax_dist.set_title(f"Distribution across {ps_results['n_combinations']} combos", fontsize=9)
     ax_dist.legend(fontsize=7, facecolor=STYLE["panel_bg"],
                    labelcolor=STYLE["text"], edgecolor=STYLE["grid"])
 
-    # Verdict text
-    ax_v = fig.add_subplot(gs[1, max(2, n_params//2):])
+    ax_v = fig.add_subplot(gs_bot[0, 1])
     _style_ax(fig, [ax_v])
     ax_v.axis("off")
     pct     = ps_results["robustness_pct"]
-    verdict = "ROBUST" if pct >= 0.7 and ps_results["metric_std"] < 0.3 else \
-              "MODERATELY ROBUST" if pct >= 0.5 else "FRAGILE"
-    color   = STYLE["green"] if verdict == "ROBUST" else \
-              STYLE["orange"] if "MODERATE" in verdict else STYLE["red"]
-    ax_v.text(0.5, 0.7, f"Verdict: {verdict}", ha="center", va="center",
-              color=color, fontsize=11, fontweight="bold",
+    verdict = "ROBUST" if pct >= 0.7 and ps_results["metric_std"] < 0.3 else               "MODERATELY ROBUST" if pct >= 0.5 else "FRAGILE"
+    color   = STYLE["green"] if verdict == "ROBUST" else               STYLE["orange"] if "MODERATE" in verdict else STYLE["red"]
+    ax_v.text(0.5, 0.72, f"Verdict: {verdict}", ha="center", va="center",
+              color=color, fontsize=12, fontweight="bold",
               transform=ax_v.transAxes)
-    ax_v.text(0.5, 0.4,
+    ax_v.text(0.5, 0.42,
               f"{pct*100:.0f}% of {ps_results['n_combinations']} combos profitable\n"
-              f"Sharpe std: {ps_results['metric_std']:.3f}\n"
+              f"Sharpe std: {ps_results['metric_std']:.3f}  (lower = more robust)\n"
               f"Best: {ps_results['metric_max']:.3f}  Mean: {ps_results['metric_mean']:.3f}",
-              ha="center", va="center", color=STYLE["text"], fontsize=8,
+              ha="center", va="center", color=STYLE["text"], fontsize=9,
               transform=ax_v.transAxes)
 
     plt.show(block=False)
@@ -342,7 +339,14 @@ def _plot_monte_carlo(mc_results, df, title):
     # Shuffle Sharpe distribution
     shuffle_sharpes = mc_results["shuffle_sharpes"]
     actual_sharpe   = mc_results["actual_sharpe"]
-    ax_sharpe.hist(shuffle_sharpes, bins=50, color=STYLE["purple"],
+
+    # Auto-detect degenerate case — low-frequency strategies produce near-identical
+    # shuffled Sharpes (most returns are 0 when flat), so bins=50 crashes.
+    sharpe_range = shuffle_sharpes.max() - shuffle_sharpes.min()
+    n_bins = max(5, min(50, int(len(shuffle_sharpes) / 10))) if sharpe_range > 1e-6 else 1
+    low_freq = sharpe_range < 1e-6
+
+    ax_sharpe.hist(shuffle_sharpes, bins=n_bins, color=STYLE["purple"],
                    alpha=0.7, edgecolor=STYLE["grid"], label="Random shuffles")
     ax_sharpe.axvline(actual_sharpe, color=STYLE["green"], linewidth=2,
                       linestyle="--", label=f"Actual ({actual_sharpe:.3f})")
@@ -360,10 +364,18 @@ def _plot_monte_carlo(mc_results, df, title):
                    ha="right", va="top", transform=ax_sharpe.transAxes,
                    color=color, fontsize=8, fontweight="bold")
 
+    if low_freq:
+        ax_sharpe.text(0.5, 0.5,
+                       "⚠ Low-frequency strategy\nShuffle test not reliable\n(<30 trades)",
+                       ha="center", va="center", transform=ax_sharpe.transAxes,
+                       color=STYLE["orange"], fontsize=8, alpha=0.9)
+
     # Final equity distribution
     sim_final = mc_results["sim_final_returns"]
     actual_eq = 1 + mc_results["actual_return"]
-    ax_final.hist(sim_final, bins=50, color=STYLE["orange"],
+    final_range = sim_final.max() - sim_final.min()
+    n_bins_final = max(5, min(50, int(len(sim_final) / 10))) if final_range > 1e-6 else 1
+    ax_final.hist(sim_final, bins=n_bins_final, color=STYLE["orange"],
                   alpha=0.7, edgecolor=STYLE["grid"], label="Simulated final equity")
     ax_final.axvline(actual_eq, color=STYLE["green"], linewidth=2,
                      linestyle="--", label=f"Actual ({actual_eq:.2f}x)")
@@ -668,3 +680,5 @@ if __name__ == "__main__":
         block()
     else:
         main()
+
+        
